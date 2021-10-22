@@ -1,20 +1,25 @@
 # Add Strategic Cycling Corridor links to matsim network
 
 # Approach - 
-# 1 Filter network links to exclude pt and non-cyclable paths, and filter network
+# 1 Filter network links to exclude pt and freeways paths, and filter network
 #   nodes to those connected by the cyclable links
-# 2 For each cycle path in Strategic Cycle network, buffer cycle paths to 250m,
+# 2 Split each Strategic Cycle Corridors (SCC) path into segments at intersections 
+#   (where SCC paths intersect – not road intersections)
+# 3 For each SC segment, buffer cycle paths to 250m [parameter], 
 #   creating constrained network within which links can be located
 # 3 Locate nearest nodes to start and end points of cycle path
 # 4 Within the constrained network, find shortest network path connecting nodes,
-#   in each direction
-# 5 If a route can't be found within the 250m buffer, progressively increase buffer
-#   up to maximum of 1.5km
-# 6 Write the SCC id (row number) and type (C1 or C2) to the links file
-# 7 Will not find routes where:
-#   (a) there are no network links at all within 250m (eg cycle paths outside study region),
-#   (b) route cannot be found within 1.5km buffer (eg disconnected network), or
-#   (c) cycle path is so short that start and end points are located near same network node.
+#   in each direction [getPathLinks function]
+# 5 If a route can't be found within the 250m buffer, then find as much (if any) of a route 
+#   as possible from/to each end (in the correct direction) [getPartialPathLinks function]
+# 6 Where there is a remaining gap to be filled, create a new link to join the 
+#   nodes at each end of the gap [bridgeGaps function]
+# 7 If the gap exceeds 1km [parameter], break the unmatched part of the cycle path into 1km sections, and
+#   create new links matching the 1km sections (each connecting the nearest nodes to the path) 
+# 8 For each link corresponding to a cycle path (whether matched or new), add attributes for
+#   the SCC id (row number) and type (C1 or C2)
+# 9 In addition, if the link is new, then complete the SCC_new field with '1', and complete
+#   its length field (corresponding to length of the equivalent path section)
 
 
 # set inputs
@@ -34,8 +39,11 @@ library(lwgeom)
 library(stringr)
 library(nngeo)  # for nn (nearest)
 
-# constants
-# MinLength <- 500
+# parameters
+bufferDistance <- 250  # distance to buffer paths, creating constrained network to search for matching links
+gapSegmentDistance <- 500  # distance (m) to break up unmatched cycle path segments to create new links
+cyclableBonus <- 0.85  # input to cost function for shortest path weight: bonus for cyclable routes
+nonCyclablePenalty <- 1.5  # equivalent penalty for non-cyclable (sometimes needed for connectivity)
 
 source("./functions/getPathLinks.R")
 
@@ -71,77 +79,24 @@ SCC <- st_read(SCCshp) %>%
 # note - can't limit to all where is_cycle==1 - some 'non-cyclable' links on main roads required for connectivity 
 cyclable.links <- links %>%
   filter(!highway %in% c("pt", "motorway", "motorway_link")) %>%
-  # create weight (for shortest path), with cyclepaths weighted @ [80%] and non-cyclable @150%
+  # cost function to create weight (for shortest path)
   # for 'simplified'
-  mutate(weight = ifelse(!is.na(cycleway), length*0.85,
-                         ifelse(is_cycle == 0, length*1.5,
+  mutate(weight = ifelse(!is.na(cycleway), length * cyclableBonus,
+                         ifelse(is_cycle == 0, length * nonCyclablePenalty,
                                 length)))
   # for 'unsimplfied'
-  # mutate(weight = ifelse(!is.na(cycleway), road_length_meter*0.9, 
-  #                        ifelse(!str_detect(modes, "bike"), road_length_meter*1.5,
+  # mutate(weight = ifelse(!is.na(cycleway), road_length_meter * cyclableBonus, 
+  #                        ifelse(!str_detect(modes, "bike"), road_length_meter * nonCyclablePenalty,
   #                              road_length_meter)))
-
-
 
 
 # filter nodes to those used in links, to remove any disconnected
 cyclable.nodes <- nodes %>%
   filter(id %in% cyclable.links$from_id | id %in% cyclable.links$to_id)
 
-# ### trying to fix SCC
-# ## stuff that doesn't work
-# test <- st_linesubstring(SCC, 0, 500) %>%
-#   mutate(testlength = st_length(geometry))
-# 
-# test <- st_segmentize(SCC, 500) %>%
-#   st_cast(to="LINESTRING")
-# 
-# SCC.splits <- SCC %>%
-#   st_line_sample(density = units::set_units(500, m)) %>%
-#   st_sf() %>%
-#   st_snap_to_grid(1)
-# 
-# split.SCC <- st_split(SCC, SCC.splits)
-# 
-# st_write(SCC.splits, "testsccsplits.sqlite", delete_dsn = TRUE)
-# st_write(split.SCC, "testsplitscc.sqlite", delete_dsn = TRUE)
-
-
-## intro to  '500m' approach
-# shortSCC <- SCC %>%
-#   filter(as.numeric(st_length(geometry)) <= MinLength)
-# longSCC <- SCC %>%
-#   filter(as.numeric(st_length(geometry)) > MinLength)
-# 
-# newSCC <- shortSCC
-
-## approach that shortens some links, but still leaves some long
-# for (i in 1:nrow(longSCC)) {
-#   # split into 500m segments - doesn't work yet - still has some segments > 500m
-#   # also, takes a couple of minutes
-#   path <- longSCC[i,] %>%
-#     # st_snap_to_grid(1) %>%
-#     st_segmentize(., MinLength)
-#   splitpoints1 <- path %>%
-#     st_line_sample(density = units::set_units(MinLength, m)) %>%
-#     st_sf() 
-#   splitpoints2 <- splitpoints1 %>%
-#     # st_snap_to_grid(1) %>%
-#     st_snap(., path, 50) %>% # doesn't succeed in snapping every point.
-#     st_cast() 
-#   splitpath <- st_split(path, splitpoints2) %>%
-#     # st_sf() %>%
-#     st_cast() #%>%
-#     # mutate(xlength = as.numeric(st_length(geometry)))
-#   
-#   newSCC <- rbind(newSCC, splitpath)
-# }
-
-## maybe...(splitting at intersections?)
-#
-newSCC <- NULL
+# split SCC at intersections
+splitSCC <- NULL
 for (i in 1:nrow(SCC)) {
-  
   path <- SCC[i,]
   cat("Splitting path #", i, "of", nrow(SCC), "at intersections\n")
   intersections <- st_intersection(path, SCC)
@@ -150,68 +105,46 @@ for (i in 1:nrow(SCC)) {
     path <- st_split(path, splitpoints) %>%
       st_cast()
   }
-
-  # mutate(xlength = as.numeric(st_length(geometry)))
-  
-  newSCC <- rbind(newSCC, path)
+  splitSCC <- rbind(splitSCC, path)
 }
 
-## testing - easy load of newSCC
-newSCC <- st_read("./testnewscc.sqlite")
-
-# # testing outputs...
-# newSCC <- newSCC %>%
-#   mutate(xlength = as.numeric(st_length(geometry)))
-# 
-# st_write(splitpath, "testsplitpath.sqlite", delete_dsn = TRUE)
-# st_write(splitpoints, "testsplitpoints.sqlite", delete_dsn = TRUE)
-# st_write(splitpoints2, "testsplitpoints2.sqlite", delete_dsn = TRUE)
-# st_write(newSCC, "testnewSCC.sqlite", delete_dsn = TRUE)
-
-
-
+# ## testing - easy load of splitSCC
+# splitSCC <- st_read("./testnewscc.sqlite")
 
 
 # 4. Run function to find links corresponding to each SCC path
 # -----------------------------------------------------------------------------
-## clearing 'links' for testing
-links <- links %>%
-  mutate(scc_id = NULL, scc_type = NULL)
+## testing - clearing links, and re-loading function
+# links <- st_read(networkFile, layer = linkLayer) %>%
+#   st_make_valid() %>%  # note - without this there are some invalid links (duplicated nodes)
+#   mutate(link_id = row_number())
+# 
+# links <- links %>%
+#   mutate(scc_id = NULL, scc_type = NULL)
+# 
+# source("./functions/getPathLinks.R")
 
-## repeated here for easy testing
-source("./functions/getPathLinks.R")
-
-## error reporting (didn't work - tried to write to it - can't write from function)
-# errorFile <- data.frame(comment = character())
+# create element to hold new links returned from each path
+accumulated.new.links <- c()
 
 for (i in 1:nrow(SCC)) {
-# for (i in c(71:80)) {
-  paths <- newSCC %>%  ### NEED A BETTER NAME FOR newSCC
+# for (i in c(1:10)) {
+  paths <- splitSCC %>% 
     filter(scc_id == i)
-  startpoint <- lwgeom::st_startpoint(SCC[i,])  ## used to try to paths
+  startpoint <- lwgeom::st_startpoint(SCC[i,])  # used to align segments of path end-to-end
   cat("Finding links for cycle path #", i, "of", nrow(SCC), "(", nrow(paths), "segments )\n")
-  # nextVertices <- c(0, 0)
   fromPoints <- c("0")
   toPoints <- c("0")
   
   for (j in 1:nrow(paths)) {
   # for (j in c(1)) {
     path <- paths[j,]
-    bufferDistance <- 250
+    
+    # get the links for each direction: returns (1 & 2) matched links in each direction,
+    # (3) new links, (4 & 5) start and end points (used to align path segments)
+    path.link.outputs <- getPathLinks(path, startpoint, fromPoints, toPoints)
 
-    # get the links for each direction
-    # path.links <- getPathLinks(path, bufferDistance, nextVertices)
-    path.link.outputs <- getPathLinks(path, bufferDistance, startpoint, fromPoints, toPoints)
-    # path.links <- getPathLinks(path, bufferDistance)
-    
-    # # if there are no links in either direction, try increased bufferDistance, up to 2km
-    # while (length(path.links[[1]]) == 0 | length(path.links[[2]]) == 0) {
-    #   bufferDistance <- bufferDistance + 50
-    #   if (bufferDistance > 2000) break
-    #   path.links <- getLinks(path, bufferDistance)
-    # }
-    
-    # combine the paths in each direction, and remove duplicates
+    # combine the links in each direction, and remove duplicates
     path.links <- c(path.link.outputs[[1]], path.link.outputs[[2]]) %>% 
       unique()
     
@@ -221,26 +154,45 @@ for (i in 1:nrow(SCC)) {
       links[links$link_id == path.links[k], "scc_type"] <- st_drop_geometry(SCC[i, "TYPE"])
     }
     
+    # add new links to accumulated new links
+    new.links <- path.link.outputs[[3]]
+    if (length(new.links) > 0) {
+      accumulated.new.links <- bind_rows(accumulated.new.links, new.links)
+    }
+
     # replace fromPoints and toPoints ready for next loop
-    fromPoints <- path.link.outputs[[3]]
-    toPoints <- path.link.outputs[[4]]
-    
+    fromPoints <- path.link.outputs[[4]]
+    toPoints <- path.link.outputs[[5]]
   }
-  
 }
+
+# add all accumulated new links to links
+links <- bind_rows(links, accumulated.new.links)
+
 
 # 5. Write outputs
 # -----------------------------------------------------------------------------
-
 st_write(links, "outputlinks.sqlite", delete_dsn = TRUE)
-st_write(SCC, "outputscc.sqlite", delete_dsn = TRUE)
 
-## testing
-filtered.links <- links %>%
-  filter(!is.na(scc_id))
-st_write(filtered.links, "outputlinksa.sqlite", delete_dsn = TRUE)
+st_write(splitSCC, "outputscc.sqlite", delete_dsn = TRUE)
 
-# 6. Testing/display tools
+# ## testing
+# filtered.links <- links %>%
+#   filter(!is.na(scc_id))
+#   # filter(scc_id == 4)
+# st_write(filtered.links, "outputlinksa.sqlite", delete_dsn = TRUE)
+# st_write(SCC, "outputscc.sqlite", delete_dsn = TRUE)
+# st_write(accumulated.new.links, "testaccumulated.sqlite", delete_dsn = TRUE)
+# 
+# ## testing - 'lost' sections of new links
+# View(accumulated.new.links)
+# lost <- accumulated.new.links %>% filter(from_id == to_id)
+# View(lost)
+# unique(lost$scc_id)
+# sum(lost$length)
+
+
+# 6. Testing/display tools [not needed to run script]
 # -----------------------------------------------------------------------------
 library(ggplot2)
 library(ggspatial)
@@ -249,7 +201,9 @@ ggplot() + geom_sf(data = cyclable.links)
 ggplot() + annotation_map_tile(type="osm",zoom=11, alpha=0.6) +
   geom_sf(data = path)
 ggplot() + annotation_map_tile(type="osm",zoom=11, alpha=0.6) +
-  geom_sf(data = path.buffered)
+  geom_sf(data = path.buffered, alpha=0.6) + 
+  geom_sf(data = path, colour = "blue") +
+  geom_sf(data = local.links)
 ggplot() + annotation_map_tile(type="osm",zoom=11, alpha=0.6) +
   geom_sf(data = local.links)
 ggplot() + annotation_map_tile(type="osm",zoom=11, alpha=0.6) +
@@ -261,10 +215,27 @@ ggplot() + annotation_map_tile(type="osm",zoom=11, alpha=0.6) +
   geom_sf(data = point1, colour = "red") +
   geom_sf(data = point2, colour = "blue") + 
   geom_sf(data = reachable.area, alpha = 0.3) +
-  geom_sf(data = path.intersecs, colour = "green")
+  geom_sf(data = path.intersecs, colour = "green") +
+  geom_sf(data = path, colour = "green")
+ggplot() + annotation_map_tile(type="osm",zoom=11, alpha=0.6) +
+  geom_sf(data = local.links) +
+  geom_sf(data = point1, colour = "red") +
+  geom_sf(data = point2, colour = "blue") + 
+  geom_sf(data = reachable.nodes)
 ggplot() + annotation_map_tile(type="osm",zoom=9, alpha=0.6) +
   geom_sf(data = SCC[SCC$scc_id == 8,])
 ggplot() + annotation_map_tile(type="osm", zoom=11, alpha=0.6) +
   geom_sf(data = reachable.area)
+ggplot() + annotation_map_tile(type="osm", zoom = 11, alpha=0.6) +
+  geom_sf(data = pathPoints) +
+  # geom_sf(data = pathSectionToBridge, colour = "red") + 
+  geom_sf(data = nodeA, colour = "blue") +
+  geom_sf(data = nodeB, colour = "blue")
+ggplot() + annotation_map_tile(type="osm", zoom = 11, alpha=0.6) +
+  geom_sf(data = pathPoints) +
+  geom_sf(data = pathSectionToBridge, colour = "red") +
+  geom_sf(data = newlink, colour = "blue")
 
 st_write(local.links, "testoutputlinks.sqlite", delete_dsn = TRUE)
+st_write(pathPoints, "testpathpoints.sqlite", delete_dsn = TRUE)
+st_write(pathSectionToBridge, "testoutputbridge.sqlite", delete_dsn = TRUE)
