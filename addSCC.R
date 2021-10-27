@@ -40,8 +40,8 @@ library(stringr)
 library(nngeo)  # for nn (nearest)
 
 # parameters
-bufferDistance <- 250  # distance to buffer paths, creating constrained network to search for matching links
-gapSegmentDistance <- 500  # distance (m) to break up unmatched cycle path segments to create new links
+bufferDistance <- 100  # distance to buffer paths, creating constrained network to search for matching links
+gapSegmentDistance <- 250  # distance (m) to break up unmatched cycle path segments to create new links
 cyclableBonus <- 0.85  # input to cost function for shortest path weight: bonus for cyclable routes
 nonCyclablePenalty <- 1.5  # equivalent penalty for non-cyclable (sometimes needed for connectivity)
 
@@ -109,11 +109,16 @@ for (i in 1:nrow(SCC)) {
 }
 
 # ## testing - easy load of splitSCC
-# splitSCC <- st_read("./testnewscc.sqlite")
+# splitSCC <- st_read("./outputscc.sqlite")
+
+# confine SCC to intersection with links bounding box
+studyAreaSCC <- st_intersection(splitSCC, 
+                                st_as_sfc(st_bbox(cyclable.links)))
 
 
 # 4. Run function to find links corresponding to each SCC path
 # -----------------------------------------------------------------------------
+# note - 'links' needs to be re-loaded before running this section
 ## testing - clearing links, and re-loading function
 # links <- st_read(networkFile, layer = linkLayer) %>%
 #   st_make_valid() %>%  # note - without this there are some invalid links (duplicated nodes)
@@ -128,41 +133,43 @@ for (i in 1:nrow(SCC)) {
 accumulated.new.links <- c()
 
 for (i in 1:nrow(SCC)) {
-# for (i in c(1:10)) {
-  paths <- splitSCC %>% 
+# for (i in c(31:40)) {
+  paths <- studyAreaSCC %>% 
     filter(scc_id == i)
-  startpoint <- lwgeom::st_startpoint(SCC[i,])  # used to align segments of path end-to-end
-  cat("Finding links for cycle path #", i, "of", nrow(SCC), "(", nrow(paths), "segments )\n")
-  fromPoints <- c("0")
-  toPoints <- c("0")
-  
-  for (j in 1:nrow(paths)) {
-  # for (j in c(1)) {
-    path <- paths[j,]
+  if (nrow(paths) > 0) {
+    startpoint <- lwgeom::st_startpoint(SCC[i,])  # used to align segments of path end-to-end
+    cat("Finding links for cycle path #", i, "of", nrow(SCC), "(", nrow(paths), "segments )\n")
+    fromPoints <- c("0")
+    toPoints <- c("0")
     
-    # get the links for each direction: returns (1 & 2) matched links in each direction,
-    # (3) new links, (4 & 5) start and end points (used to align path segments)
-    path.link.outputs <- getPathLinks(path, startpoint, fromPoints, toPoints)
-
-    # combine the links in each direction, and remove duplicates
-    path.links <- c(path.link.outputs[[1]], path.link.outputs[[2]]) %>% 
-      unique()
-    
-    # add SCC cycle path id and type to links
-    for (k in 1:length(path.links)) {
-      links[links$link_id == path.links[k], "scc_id"] <- st_drop_geometry(SCC[i, "scc_id"])
-      links[links$link_id == path.links[k], "scc_type"] <- st_drop_geometry(SCC[i, "TYPE"])
+    for (j in 1:nrow(paths)) {
+      # for (j in c(1)) {
+      path <- paths[j,]
+      
+      # get the links for each direction: returns (1 & 2) matched links in each direction,
+      # (3) new links, (4 & 5) start and end points (used to align path segments)
+      path.link.outputs <- getPathLinks(path, startpoint, fromPoints, toPoints)
+      
+      # combine the links in each direction, and remove duplicates
+      path.links <- c(path.link.outputs[[1]], path.link.outputs[[2]]) %>% 
+        unique()
+      
+      # add SCC cycle path id and type to links
+      for (k in 1:length(path.links)) {
+        links[links$link_id == path.links[k], "scc_id"] <- st_drop_geometry(SCC[i, "scc_id"])
+        links[links$link_id == path.links[k], "scc_type"] <- st_drop_geometry(SCC[i, "TYPE"])
+      }
+      
+      # add new links to accumulated new links
+      new.links <- path.link.outputs[[3]]
+      if (length(new.links) > 0) {
+        accumulated.new.links <- bind_rows(accumulated.new.links, new.links)
+      }
+      
+      # replace fromPoints and toPoints ready for next loop
+      fromPoints <- path.link.outputs[[4]]
+      toPoints <- path.link.outputs[[5]]
     }
-    
-    # add new links to accumulated new links
-    new.links <- path.link.outputs[[3]]
-    if (length(new.links) > 0) {
-      accumulated.new.links <- bind_rows(accumulated.new.links, new.links)
-    }
-
-    # replace fromPoints and toPoints ready for next loop
-    fromPoints <- path.link.outputs[[4]]
-    toPoints <- path.link.outputs[[5]]
   }
 }
 
@@ -235,6 +242,8 @@ ggplot() + annotation_map_tile(type="osm", zoom = 11, alpha=0.6) +
   geom_sf(data = pathPoints) +
   geom_sf(data = pathSectionToBridge, colour = "red") +
   geom_sf(data = newlink, colour = "blue")
+ggplot() + geom_sf(data = splitSCC, colour = "blue") +
+  geom_sf(data = studyAreaSCC, colour = "red")
 
 st_write(local.links, "testoutputlinks.sqlite", delete_dsn = TRUE)
 st_write(pathPoints, "testpathpoints.sqlite", delete_dsn = TRUE)

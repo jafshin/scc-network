@@ -63,11 +63,14 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
 
     # find 3 nearest nodes to each of start and end points, because sometimes nearest is
     # unsuitable - on one way road; note the igraph functions expect character input
+    ## however, sometimes it would be better to use nearest - for future enhancement, add
+    ## function to add back in link(s) from #1 to #2 and/or #3 where nearest not selected 
+    ## and there is a direct connection
     nodes1 <- as.character(cyclable.nodes[st_nn(point1, cyclable.nodes, k=3)[[1]], "id"][[1]])
     nodes2 <- as.character(cyclable.nodes[st_nn(point2, cyclable.nodes, k=3)[[1]], "id"][[1]])
     
     # if nodes are different, proceed; if not (ie start and end are same) then return empty vectors
-    if (nodes1 != nodes2) {
+    if (!all(nodes1 == nodes2)) {
       #====== first direction ================================
       # if one of the 3 nearest has already been used as start/end point of another segment, then use it
       # (helps align segments end-to-end - this is what 'fromPoints' and 'toPoints' are for)
@@ -89,7 +92,11 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
       # 'function'shortest_paths' finds least cost path between nodes, and return edges ('epath')
       if (min(distances1) < Inf) {  # path exists ('Inf' means no path)
         # find row and column corresponding to min distances - row is [1] and column is [2]
+        # if more than one - take the first
         shortestDist1 <- which(distances1 == min(distances1), arr.ind = TRUE)
+        if (nrow(shortestDist1) > 1) {
+          shortestDist1 <- shortestDist1[1,]
+        }
         # find the vertex id's for the shortest distances
         shortestPair1 <- c(rownames(distances1)[shortestDist1[1]], 
                            colnames(distances1)[shortestDist1[2]])  
@@ -135,8 +142,7 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
         intersectionNodeB <- partial.path.link.outputs[[5]]
         
         # create new links for the remaining gap
-        new.links <- bind_rows(new.links,
-                               bridgeGaps(path, intersectionNodeA, intersectionNodeB, new.links)) 
+        new.links <- bridgeGaps(path, intersectionNodeA, intersectionNodeB, new.links) 
       }
 
       #====== second direction ================================
@@ -160,7 +166,11 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
       # 'function'shortest_paths' finds least cost path between nodes, and return edges ('epath')
       if (min(distances2) < Inf) {  # path exists ('Inf' means no path)
         # find row and column corresponding to min distances - row is [1] and column is [2]
+        # if more than one - take the first
         shortestDist2 <- which(distances2 == min(distances2), arr.ind = TRUE)
+        if (nrow(shortestDist2) > 1) {
+          shortestDist2 <- shortestDist2[1,]
+        }
         # find the vertex id's for the shortest distances
         shortestPair2 <- c(rownames(distances2)[shortestDist2[1]], 
                            colnames(distances2)[shortestDist2[2]])  
@@ -206,8 +216,7 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
         intersectionNodeB <- partial.path.link.outputs[[5]]
         
         # create new links for the remaining gap
-        new.links <- bind_rows(new.links,
-                               bridgeGaps(path, intersectionNodeA, intersectionNodeB, new.links)) 
+        new.links <- bridgeGaps(path, intersectionNodeA, intersectionNodeB, new.links) 
       }
       
      } else {cat("No path for cycle path #", path$scc_id, "segment", j, "because start and end nodes are the same (too short)\n")}
