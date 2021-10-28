@@ -1,7 +1,9 @@
 # Function - to find network links comprising shortest path for given cycle path segment
 
 # getPathLinks <- function(path, bufferDistance, nextVertices) {
-getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
+getPathLinks <- function(path, startpoint, 
+                         firstDirFromPoints, firstDirToPoints,
+                         secondDirFromPoints, secondDirToPoints) {
   
   source("./functions/getPartialPathLinks.R")
   source("./functions/bridgeGaps.R")
@@ -49,7 +51,7 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
     
     # find cycle path start and end points, and order on basis of nearest to start 
     # of overall path, so segments are laid out with end of one matching start of next
-    # helps matching start and end point (but wouldn't give good results for a U-shaped path)
+    # helps matching start and end point (but not effective for a U-shaped path, eg SCC #753)
     pathstart <- lwgeom::st_startpoint(path)
     pathend <- lwgeom::st_endpoint(path)
     
@@ -74,14 +76,14 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
       #====== first direction ================================
       # if one of the 3 nearest has already been used as start/end point of another segment, then use it
       # (helps align segments end-to-end - this is what 'fromPoints' and 'toPoints' are for)
-      if (length(intersect(nodes1, toPoints)) > 0) {
-        fromNodes <- intersect(nodes1, toPoints)[1]
+      if (length(intersect(nodes1, firstDirToPoints)) > 0) {
+        fromNodes <- intersect(nodes1, firstDirToPoints)[1]
       } else {
         fromNodes <- nodes1
       }
       
-      if (length(intersect(nodes2, fromPoints)) > 0) {
-        toNodes <- intersect(nodes2, fromPoints)[1]
+      if (length(intersect(nodes2, firstDirFromPoints)) > 0) {
+        toNodes <- intersect(nodes2, firstDirFromPoints)[1]
       } else {
         toNodes <- nodes2
       }
@@ -120,8 +122,8 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
           path.links1 <- unique(path.links1)
           
           # add from and to points (so subsequent segments of the path can re-use them)
-          fromPoints <- c(fromPoints, shortestPair1[1])
-          toPoints <- c(toPoints, shortestPair1[2])
+          firstDirFromPoints <- c(firstDirFromPoints, shortestPair1[1])
+          firstDirToPoints <- c(firstDirToPoints, shortestPair1[2])
           
         } else {cat("No path found for cycle path #", path$scc_id, "segment", j, "direction 1 (selected nodes are same)\n")}
       } else {  # if min(distances1) is Inf - ie no path - then find partial paths from each end
@@ -133,11 +135,11 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
                                                          path.links = path.links1,
                                                          sourcePoint = point1,
                                                          destPoint = point2,
-                                                         fromPoints,
-                                                         toPoints)
+                                                         fromPoints = firstDirFromPoints,
+                                                         toPoints = firstDirToPoints)
         path.links1 <- partial.path.link.outputs[[1]]
-        fromPoints <- partial.path.link.outputs[[2]]
-        toPoints <- partial.path.link.outputs[[3]]
+        firstDirFromPoints <- partial.path.link.outputs[[2]]
+        firstDirToPoints <- partial.path.link.outputs[[3]]
         intersectionNodeA <- partial.path.link.outputs[[4]]
         intersectionNodeB <- partial.path.link.outputs[[5]]
         
@@ -148,14 +150,14 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
       #====== second direction ================================
       # if one of the 3 nearest has already been used as start/end point of another segment, then use it
       # (helps align segments end-to-end - this is what 'fromPoints' and 'toPoints' are for)
-      if (length(intersect(nodes2, toPoints)) > 1) {
-        fromNodes <- intersect(nodes2, toPoints)[1]
+      if (length(intersect(nodes2, secondDirToPoints)) > 1) {
+        fromNodes <- intersect(nodes2, secondDirToPoints)[1]
       } else {
         fromNodes <- nodes2
       }
       
-      if (length(intersect(nodes1, fromPoints)) > 1) {
-        toNodes <- intersect(nodes1, fromPoints)[1]
+      if (length(intersect(nodes1, firstDirFromPoints)) > 1) {
+        toNodes <- intersect(nodes1, firstDirFromPoints)[1]
       } else {
         toNodes <- nodes1
       }
@@ -194,8 +196,8 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
           path.links2 <- unique(path.links2)
           
           # add from and to points (so subsequent segments of the path can re-use them)
-          fromPoints <- c(fromPoints, shortestPair2[1])
-          toPoints <- c(toPoints, shortestPair2[2])
+          secondDirFromPoints <- c(secondDirFromPoints, shortestPair2[1])
+          secondDirToPoints <- c(secondDirToPoints, shortestPair2[2])
           
         }  else {cat("No path found for cycle path #", path$scc_id, "segment", j, "direction 2 (selected nodes are same)\n")} # not expected to appear
       } else {  # if min(distances1) is Inf - ie no path - then find partial paths from each end
@@ -207,11 +209,11 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
                                                          path.links = path.links2,
                                                          sourcePoint = point2,
                                                          destPoint = point1,
-                                                         fromPoints,
-                                                         toPoints)
+                                                         fromPoints = secondDirFromPoints,
+                                                         toPoints = secondDirToPoints)
         path.links2 <- partial.path.link.outputs[[1]]
-        fromPoints <- partial.path.link.outputs[[2]]
-        toPoints <- partial.path.link.outputs[[3]]
+        secondDirFromPoints <- partial.path.link.outputs[[2]]
+        secondDirToPoints <- partial.path.link.outputs[[3]]
         intersectionNodeA <- partial.path.link.outputs[[4]]
         intersectionNodeB <- partial.path.link.outputs[[5]]
         
@@ -223,5 +225,7 @@ getPathLinks <- function(path, startpoint, fromPoints, toPoints) {
   } else {cat("No local links found for cycle path #", path$scc_id, "segment", j, ", probably outside Melbourne\n")}
 
   # return the outputs as a list
-  return(list(path.links1, path.links2, new.links, fromPoints, toPoints))
+  return(list(path.links1, path.links2, new.links, 
+              firstDirFromPoints, firstDirToPoints,
+              secondDirFromPoints, secondDirToPoints))
 }

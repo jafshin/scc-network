@@ -7,18 +7,21 @@
 #   (where SCC paths intersect – not road intersections)
 # 3 For each SC segment, buffer cycle paths to 250m [parameter], 
 #   creating constrained network within which links can be located
-# 3 Locate nearest nodes to start and end points of cycle path
+# 3 Locate nearest nodes to start and end points of cycle path (use 3 nodes - closest may be unsuitable,
+#   for example because it connects only to one-way links in the wrong direction)
 # 4 Within the constrained network, find shortest network path connecting nodes,
 #   in each direction [getPathLinks function]
 # 5 If a route can't be found within the 250m buffer, then find as much (if any) of a route 
 #   as possible from/to each end (in the correct direction) [getPartialPathLinks function]
 # 6 Where there is a remaining gap to be filled, create a new link to join the 
 #   nodes at each end of the gap [bridgeGaps function]
-# 7 If the gap exceeds 1km [parameter], break the unmatched part of the cycle path into 1km sections, and
-#   create new links matching the 1km sections (each connecting the nearest nodes to the path) 
-# 8 For each link corresponding to a cycle path (whether matched or new), add attributes for
+# 7 If the gap exceeds 250m [parameter], break the unmatched part of the cycle path into 250m sections, and
+#   create new links matching the 250m sections (each connecting the nearest nodes to the path) 
+# 8 Where 2nd or 3rd closest node was used as start or end point of route, see whether a direct link
+#   exists (in the correct direction) to a closer node
+# 9 For each link corresponding to a cycle path (whether matched or new), add attributes for
 #   the SCC id (row number) and type (C1 or C2)
-# 9 In addition, if the link is new, then complete the SCC_new field with '1', and complete
+# 10 In addition, if the link is new, then complete the SCC_new field with '1', and complete
 #   its length field (corresponding to length of the equivalent path section)
 
 
@@ -46,6 +49,8 @@ cyclableBonus <- 0.85  # input to cost function for shortest path weight: bonus 
 nonCyclablePenalty <- 1.5  # equivalent penalty for non-cyclable (sometimes needed for connectivity)
 
 source("./functions/getPathLinks.R")
+source("./functions/getStartEndLinks.R")
+
 
 # 1. Load inputs - links, nodes and SCC
 # -----------------------------------------------------------------------------
@@ -119,36 +124,42 @@ studyAreaSCC <- st_intersection(splitSCC,
 # 4. Run function to find links corresponding to each SCC path
 # -----------------------------------------------------------------------------
 # note - 'links' needs to be re-loaded before running this section
-## testing - clearing links, and re-loading function
+# ## testing - clearing links, and re-loading function
 # links <- st_read(networkFile, layer = linkLayer) %>%
 #   st_make_valid() %>%  # note - without this there are some invalid links (duplicated nodes)
 #   mutate(link_id = row_number())
-# 
-# links <- links %>%
-#   mutate(scc_id = NULL, scc_type = NULL)
-# 
+# # # 
+# # # links <- links %>%
+# # #   mutate(scc_id = NULL, scc_type = NULL)
+# # # 
 # source("./functions/getPathLinks.R")
+# source("./functions/getStartEndLinks.R")
 
 # create element to hold new links returned from each path
 accumulated.new.links <- c()
 
 for (i in 1:nrow(SCC)) {
-# for (i in c(31:40)) {
-  paths <- studyAreaSCC %>% 
+# for (i in c(1:10)) {
+  paths <- studyAreaSCC %>%
     filter(scc_id == i)
   if (nrow(paths) > 0) {
-    startpoint <- lwgeom::st_startpoint(SCC[i,])  # used to align segments of path end-to-end
+    startpoint <- lwgeom::st_startpoint(SCC[i,])  # used to align segments of path end-to-end, and for start/end links
+    endpoint <- lwgeom::st_endpoint(SCC[i,])  # used for start/end links
     cat("Finding links for cycle path #", i, "of", nrow(SCC), "(", nrow(paths), "segments )\n")
-    fromPoints <- c("0")
-    toPoints <- c("0")
+    firstDirFromPoints <- c("0")
+    firstDirToPoints <- c("0")
+    secondDirFromPoints <- c("0")
+    secondDirToPoints <- c("0")
     
     for (j in 1:nrow(paths)) {
       # for (j in c(1)) {
       path <- paths[j,]
       
       # get the links for each direction: returns (1 & 2) matched links in each direction,
-      # (3) new links, (4 & 5) start and end points (used to align path segments)
-      path.link.outputs <- getPathLinks(path, startpoint, fromPoints, toPoints)
+      # (3) new links, (4 - 5) start and end points (used to align path segments)
+      path.link.outputs <- getPathLinks(path, startpoint, 
+                                        firstDirFromPoints, firstDirToPoints, 
+                                        secondDirFromPoints, secondDirToPoints)
       
       # combine the links in each direction, and remove duplicates
       path.links <- c(path.link.outputs[[1]], path.link.outputs[[2]]) %>% 
@@ -167,9 +178,31 @@ for (i in 1:nrow(SCC)) {
       }
       
       # replace fromPoints and toPoints ready for next loop
-      fromPoints <- path.link.outputs[[4]]
-      toPoints <- path.link.outputs[[5]]
+      firstDirFromPoints <- path.link.outputs[[4]]
+      firstDirToPoints <- path.link.outputs[[5]]
+      secondDirFromPoints <- path.link.outputs[[6]]
+      secondDirToPoints <- path.link.outputs[[7]]
     }
+    
+    # see whether further links can be added at start and end (selected links will start and
+    # end at one of closest 3 nodes - if 2nd or 3rd has been selected, this may be able to link to a closer)
+    start.end.links <- c(0)
+    if (length(firstDirFromPoints) > 1 | length(firstDirToPoints) > 1) {
+      first.dir.start.end.links <- getStartEndLinks(startpoint, endpoint,
+                                                    firstDirFromPoints, firstDirToPoints)
+    }
+    if (length(secondDirFromPoints) > 1 | length(secondDirToPoints) > 1) {
+      second.dir.start.end.links <- getStartEndLinks(endpoint, startpoint,
+                                                     secondDirFromPoints, secondDirToPoints)
+    }
+
+    start.end.links <- c(start.end.links, first.dir.start.end.links, second.dir.start.end.links) %>%
+      unique()  # remove duplicates (could arise because in both directions)
+    for (j in 1:length(start.end.links)) {  
+      links[links$link_id == start.end.links[j], "scc_id"] <- st_drop_geometry(SCC[i, "scc_id"])
+      links[links$link_id == start.end.links[j], "scc_type"] <- st_drop_geometry(SCC[i, "TYPE"])
+    }
+  
   }
 }
 
@@ -179,7 +212,7 @@ links <- bind_rows(links, accumulated.new.links)
 
 # 5. Write outputs
 # -----------------------------------------------------------------------------
-st_write(links, "outputlinks.sqlite", delete_dsn = TRUE)
+st_write(links, "outputlinks100_250se.sqlite", delete_dsn = TRUE)
 
 st_write(splitSCC, "outputscc.sqlite", delete_dsn = TRUE)
 
@@ -188,7 +221,7 @@ st_write(splitSCC, "outputscc.sqlite", delete_dsn = TRUE)
 #   filter(!is.na(scc_id))
 #   # filter(scc_id == 4)
 # st_write(filtered.links, "outputlinksa.sqlite", delete_dsn = TRUE)
-# st_write(SCC, "outputscc.sqlite", delete_dsn = TRUE)
+# # st_write(SCC, "outputscc.sqlite", delete_dsn = TRUE)
 # st_write(accumulated.new.links, "testaccumulated.sqlite", delete_dsn = TRUE)
 # 
 # ## testing - 'lost' sections of new links
@@ -207,6 +240,10 @@ library(ggspatial)
 ggplot() + geom_sf(data = cyclable.links)
 ggplot() + annotation_map_tile(type="osm",zoom=11, alpha=0.6) +
   geom_sf(data = path)
+ggplot() + annotation_map_tile(type="osm",zoom=11, alpha=0.6) +
+  geom_sf(data = paths) + 
+  geom_sf(data = startpoint, colour = "red") +
+  geom_sf(data = endpoint, colour = "blue")
 ggplot() + annotation_map_tile(type="osm",zoom=11, alpha=0.6) +
   geom_sf(data = path.buffered, alpha=0.6) + 
   geom_sf(data = path, colour = "blue") +
